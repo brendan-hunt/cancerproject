@@ -1,0 +1,166 @@
+---
+title: "Breast Cancer Wisconsin - Random Forest Classification Report"
+author: "Data Science Report"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+  pdf_document:
+    toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.align = "center")
+
+required_packages <- c("randomForest", "caret", "e1071", "knitr")
+for (pkg in required_packages) {
+  if (!requireNamespace(pkg, quietly = TRUE)) install.packages(pkg)
+}
+
+library(randomForest)
+library(caret)
+library(knitr)
+
+set.seed(42)
+```
+
+## 1. Data Ingestion
+
+```{r data-ingestion}
+bc_data <- read.csv("breast_cancer.csv", stringsAsFactors = FALSE)
+
+bc_data$id <- NULL
+empty_cols <- names(bc_data)[names(bc_data) == "" | grepl("^X$|^X\\.", names(bc_data))]
+bc_data[empty_cols] <- NULL
+bc_data <- bc_data[, colSums(is.na(bc_data)) < nrow(bc_data)]
+
+numeric_cols <- sapply(bc_data, is.numeric)
+for (col in names(bc_data)[numeric_cols]) {
+  if (any(is.na(bc_data[[col]]))) {
+    bc_data[[col]][is.na(bc_data[[col]])] <- median(bc_data[[col]], na.rm = TRUE)
+  }
+}
+
+bc_data$diagnosis <- factor(bc_data$diagnosis, levels = c("B", "M"),
+                             labels = c("Benign", "Malignant"))
+bc_data <- bc_data[!is.na(bc_data$diagnosis), ]
+```
+
+```{r data-summary}
+kable(data.frame(Metric = c("Rows", "Columns"),
+                  Value = c(nrow(bc_data), ncol(bc_data))),
+      caption = "Dataset Dimensions")
+
+kable(as.data.frame(table(bc_data$diagnosis)),
+      col.names = c("Diagnosis", "Count"),
+      caption = "Class Distribution")
+```
+
+## 2. Data Partitioning
+
+```{r partition}
+set.seed(42)
+train_index <- createDataPartition(bc_data$diagnosis, p = 0.80, list = FALSE)
+train_data <- bc_data[train_index, ]
+test_data  <- bc_data[-train_index, ]
+
+kable(data.frame(Set = c("Training", "Test"),
+                  Rows = c(nrow(train_data), nrow(test_data))),
+      caption = "Train / Test Split (80/20)")
+```
+
+## 3. Model Fitting
+
+```{r tune-mtry, results='hide'}
+set.seed(42)
+tuned_mtry <- tuneRF(
+  x = train_data[, -which(names(train_data) == "diagnosis")],
+  y = train_data$diagnosis,
+  ntreeTry = 500,
+  stepFactor = 1.5,
+  improve = 0.01,
+  trace = FALSE,
+  plot = FALSE
+)
+best_mtry <- tuned_mtry[which.min(tuned_mtry[, "OOBError"]), "mtry"]
+```
+
+Selected `mtry`: **`r best_mtry`**
+
+```{r train-model}
+rf_model <- randomForest(
+  diagnosis ~ .,
+  data = train_data,
+  ntree = 1000,
+  mtry = best_mtry,
+  importance = TRUE
+)
+
+saveRDS(rf_model, "rf_model.rds")
+
+print(rf_model)
+```
+
+The trained model is saved to `rf_model.rds` in the working directory, and can be reloaded later without retraining:
+
+```r
+rf_model <- readRDS("rf_model.rds")
+predict(rf_model, newdata = new_patient_data)
+```
+
+## 4. Model Evaluation
+
+```{r evaluate}
+rf_predictions <- predict(rf_model, newdata = test_data)
+
+conf_matrix <- confusionMatrix(
+  rf_predictions,
+  test_data$diagnosis,
+  positive = "Malignant"
+)
+
+saveRDS(conf_matrix, "confusion_matrix.rds")
+
+conf_matrix
+```
+
+### Key Performance Metrics
+
+```{r metrics-table}
+metrics_df <- data.frame(
+  Metric = c("Accuracy", "Sensitivity (Malignant Recall)", "Specificity"),
+  Value = round(c(conf_matrix$overall["Accuracy"],
+                   conf_matrix$byClass["Sensitivity"],
+                   conf_matrix$byClass["Specificity"]), 4)
+)
+kable(metrics_df, caption = "Test Set Performance")
+```
+
+- **Accuracy**: overall proportion of correct predictions across both classes.
+- **Sensitivity**: of all actual malignant cases, the proportion correctly flagged — the most clinically important number, since a missed malignant case is the costliest error.
+- **Specificity**: of all actual benign cases, the proportion correctly cleared.
+
+## 5. Feature Importance
+
+```{r importance-table}
+importance_df <- as.data.frame(round(importance(rf_model), 3))
+kable(importance_df, caption = "Variable Importance Scores")
+```
+
+```{r importance-plot, fig.width=9, fig.height=7}
+varImpPlot(
+  rf_model,
+  main = "Random Forest - Feature Importance",
+  n.var = min(15, nrow(importance_df)),
+  pch = 19,
+  color = "steelblue"
+)
+```
+
+## 6. Session Info
+
+```{r session-info}
+sessionInfo()
+```
